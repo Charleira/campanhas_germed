@@ -454,7 +454,7 @@ function fmtBonus(val) {
   if (p >= 120) b = 50;
   else if (p > 100 && p < 120) b = 20;
   else b = 0;
-  const cls = b >= 100 ? 'pct-green' : b >= 75 ? 'pct-yellow' : b > 0 ? 'pct-red' : 'pct-na';
+  const cls = b >= 20 ? 'pct-green' : b >= 50 ? 'pct-dark-green' : 'pct-na';
   return `<span class="${cls}">${b.toLocaleString('pt-BR',{minimumFractionDigits:1,maximumFractionDigits:1})}%</span>`;
 }
 
