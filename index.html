@@ -114,6 +114,13 @@
         .th-obt-sub { background: #2d6a4f; color: #d8f3dc; }
         .th-bon-sub { background: #1b4332; color: #b7e4c7; }
 
+        /* KPIs ≥100% count column styling */
+        .th-kpi100 { background: #1a3d28; color: #a8e6c0; }
+        .td-kpi100 { font-weight: 700; }
+        .td-kpi100-high { color: #1b7a3e; font-weight: 700; }
+        .td-kpi100-mid  { color: #2d6a4f; font-weight: 700; }
+        .td-kpi100-low  { color: #6c757d; }
+
         tbody tr { transition: background 0.1s; }
         tbody tr:hover td { background: #e8f5e9 !important; color: #1a1a2e !important; }
 
@@ -197,6 +204,12 @@
         <option value="gr">GR (Ger. Regional)</option>
         <option value="gd">GD (Ger. Distrital)</option>
     </select>
+    <label>↕️ Ordenar:</label>
+    <select id="sortMode">
+        <option value="hierarchy">Sem ordem (hierarquia)</option>
+        <option value="desc">Maior → Menor</option>
+        <option value="asc">Menor → Maior</option>
+    </select>
 </div>
 
 <div id="main-content">
@@ -230,14 +243,15 @@ const GD_NAMES = new Set();
 
 // ─── URLs dos JSONs no SharePoint ─────────────────────
   // Substitua as URLs abaixo pelas URLs reais dos seus arquivos JSON no SharePoint
-  const URL_FATURAMENTO = './data_faturamento.json';
-  const URL_RFAT        = './data_RFAT.json';
+  const URL_FATURAMENTO = 'data_faturamento.json';
+  const URL_RFAT        = 'data_rfat.json';
 
 // ─── Carregamento automático ao abrir ─────────────────
 document.addEventListener('DOMContentLoaded', loadData);
 document.getElementById('dateFilter').addEventListener('change', renderTable);
 document.getElementById('searchInput').addEventListener('input', renderTable);
 document.getElementById('levelFilter').addEventListener('change', renderTable);
+document.getElementById('sortMode').addEventListener('change', renderTable);
 
 
 function unwrapSharePointJson(data) {
@@ -689,15 +703,130 @@ function buildRows(selDate) {
     });
   });
 
-  rows.sort((a, b) => a.nome.localeCompare(b.nome));
+  // ✅ ALTERAÇÃO 1: Removida a ordenação alfabética simples.
+  // A ordenação hierárquica é feita em orderRowsHierarchically() abaixo.
   return rows;
+}
+
+// ─── ALTERAÇÃO 1: Ordenação Hierárquica ──────────────────────────
+/**
+ * Organiza as linhas em ordem hierárquica: GN → GR → GD → REP
+ * Dentro de cada nível, a ordenação é alfabética pelo nome.
+ * Linhas sem hierarquia definida vão ao final.
+ */
+function orderRowsHierarchically(rows) {
+  // Indexar por nome para lookup rápido
+  const byName = {};
+  rows.forEach(r => { byName[r.nome] = r; });
+
+  // Separar por nível
+  const gns  = rows.filter(r => r.level === 'gn').sort((a,b) => a.nome.localeCompare(b.nome));
+  const grs  = rows.filter(r => r.level === 'gr').sort((a,b) => a.nome.localeCompare(b.nome));
+  const gds  = rows.filter(r => r.level === 'gd').sort((a,b) => a.nome.localeCompare(b.nome));
+  const reps = rows.filter(r => r.level === 'rep').sort((a,b) => a.nome.localeCompare(b.nome));
+
+  const result = [];
+  const placed = new Set();
+
+  function place(row) {
+    if (!placed.has(row.nome)) {
+      placed.add(row.nome);
+      result.push(row);
+    }
+  }
+
+  // Para cada GN, posiciona seus filhos em cascata
+  gns.forEach(gn => {
+    place(gn);
+
+    // GRs que reportam a este GN (campo nac == gn.nome)
+    const myGrs = grs.filter(r => r.nac === gn.nome);
+    myGrs.forEach(gr => {
+      place(gr);
+
+      // GDs que reportam a este GR (campo gr == gr.nome)
+      const myGds = gds.filter(d => d.gr === gr.nome);
+      myGds.forEach(gd => {
+        place(gd);
+
+        // REPs que reportam a este GD (campo gd == gd.nome)
+        const myReps = reps.filter(r => r.gd === gd.nome);
+        myReps.forEach(rep => place(rep));
+      });
+
+      // REPs que reportam diretamente ao GR (sem GD)
+      const directReps = reps.filter(r => r.gr === gr.nome && (!r.gd || !byName[r.gd]));
+      directReps.forEach(rep => place(rep));
+    });
+
+    // GDs que reportam diretamente ao GN (sem GR intermediário presente)
+    const directGds = gds.filter(d => d.nac === gn.nome && (!d.gr || !byName[d.gr]));
+    directGds.forEach(gd => {
+      place(gd);
+      const myReps = reps.filter(r => r.gd === gd.nome);
+      myReps.forEach(rep => place(rep));
+    });
+
+    // REPs que reportam diretamente ao GN
+    const directReps = reps.filter(r => r.nac === gn.nome && (!r.gr || !byName[r.gr]) && (!r.gd || !byName[r.gd]));
+    directReps.forEach(rep => place(rep));
+  });
+
+  // GRs órfãos (sem GN correspondente nos dados)
+  grs.forEach(gr => {
+    if (placed.has(gr.nome)) return;
+    place(gr);
+    const myGds = gds.filter(d => d.gr === gr.nome);
+    myGds.forEach(gd => {
+      place(gd);
+      reps.filter(r => r.gd === gd.nome).forEach(rep => place(rep));
+    });
+    reps.filter(r => r.gr === gr.nome && (!r.gd || !byName[r.gd])).forEach(rep => place(rep));
+  });
+
+  // GDs órfãos
+  gds.forEach(gd => {
+    if (placed.has(gd.nome)) return;
+    place(gd);
+    reps.filter(r => r.gd === gd.nome).forEach(rep => place(rep));
+  });
+
+  // REPs ainda não posicionados (sem hierarquia completa)
+  reps.forEach(rep => place(rep));
+
+  return result;
+}
+
+// ─── ALTERAÇÃO 3: Calcula contadores de KPIs por linha ──────────
+/**
+ * Retorna { kpis100Count, kpisValidCount } para uma linha,
+ * considerando apenas os kpiCols visíveis e aplicabilidade KAM/OTH.
+ */
+function calcKpiCounts(row, kpiCols) {
+  let kpis100Count = 0;
+  let kpisValidCount = 0;
+
+  kpiCols.forEach(c => {
+    const notApp = (c.onlyKam && !row.kam) || (c.onlyOth && row.kam);
+    if (notApp) return;
+
+    const val = row.kpis[c.key];
+    const p = normPct(val);
+    if (p === null) return; // nulo → não conta como válido
+
+    kpisValidCount++;
+    if (p >= 100) kpis100Count++;
+  });
+
+  return { kpis100Count, kpisValidCount };
 }
 
 // ─── Render ───────────────────────────────────────────
 function renderTable() {
-  const selDate = document.getElementById('dateFilter').value;
-  const search = document.getElementById('searchInput').value.toLowerCase();
-  const levelF = document.getElementById('levelFilter').value;
+  const selDate  = document.getElementById('dateFilter').value;
+  const search   = document.getElementById('searchInput').value.toLowerCase();
+  const levelF   = document.getElementById('levelFilter').value;
+  const sortMode = document.getElementById('sortMode').value;
   if (!selDate) return;
 
   let rows = buildRows(selDate);
@@ -744,11 +873,30 @@ function renderTable() {
 
   const nc = kpiCols.length;
 
-  // Build thead
+  // ✅ ALTERAÇÃO 2: Aplicar ordenação conforme sortMode
+  if (sortMode === 'hierarchy') {
+    rows = orderRowsHierarchically(rows);
+  } else {
+    // Calcular contadores para cada linha antes de ordenar
+    rows.forEach(r => {
+      const counts = calcKpiCounts(r, kpiCols);
+      r._kpis100Count   = counts.kpis100Count;
+      r._kpisValidCount = counts.kpisValidCount;
+    });
+
+    rows.sort((a, b) => {
+      const dir = sortMode === 'desc' ? -1 : 1;
+      if (a._kpis100Count !== b._kpis100Count) return dir * (b._kpis100Count - a._kpis100Count);
+      if (a._kpisValidCount !== b._kpisValidCount) return dir * (b._kpisValidCount - a._kpisValidCount);
+      return a.nome.localeCompare(b.nome);
+    });
+  }
+
+  // ✅ ALTERAÇÃO 3: colspan atualizado de 4 para 6 (COLABORADOR agora tem 2 cols extras)
   let html = `<table>
   <thead>
     <tr class="tr-top">
-      <th class="th-id-top" colspan="4">COLABORADOR</th>
+      <th class="th-id-top" colspan="6">COLABORADOR</th>
       <th class="th-obt-top sep-r-th" colspan="${nc}">PORCENTAGEM OBTIDA</th>
       <th class="th-bon-top" colspan="${nc}">PORCENTAGEM BÔNUS</th>
     </tr>
@@ -756,7 +904,9 @@ function renderTable() {
       <th class="th-id-sub" style="min-width:210px;position:sticky;left:0;z-index:3;">NOME</th>
       <th class="th-id-sub">NACI.</th>
       <th class="th-id-sub">GR</th>
-      <th class="th-id-sub sep-r-th">GD</th>`;
+      <th class="th-id-sub sep-r-th">GD</th>
+      <th class="th-kpi100" title="Quantidade de KPIs com porcentagem obtida ≥ 100%">KPIs ≥100%</th>
+      <th class="th-kpi100 sep-r-th" title="Quantidade de KPIs aplicáveis e não nulos">KPIs válidos</th>`;
 
   kpiCols.forEach((c, i) => {
     const last = i === nc - 1;
@@ -774,11 +924,22 @@ function renderTable() {
   rows.forEach(r => {
     const cls = `lv-${r.level}`;
     const kamBadge = r.kam ? ' <span style="font-size:0.67rem;background:#1b4332;color:#d8f3dc;padding:1px 5px;border-radius:4px;vertical-align:middle;">KAM</span>' : '';
+
+    // ✅ ALTERAÇÃO 3: calcular os contadores para cada linha
+    const { kpis100Count, kpisValidCount } = calcKpiCounts(r, kpiCols);
+
+    // Classe de ênfase para kpis100Count
+    let kpi100Class = 'td-kpi100-low';
+    if (kpis100Count >= nc && nc > 0) kpi100Class = 'td-kpi100-high';
+    else if (kpis100Count > 0) kpi100Class = 'td-kpi100-mid';
+
     html += `<tr class="${cls}">
       <td class="td-nome">${r.nome}${kamBadge}</td>
       <td class="td-badge">${r.nac}</td>
       <td class="td-badge">${r.gr}</td>
-      <td class="td-badge sep-r">${r.gd}</td>`;
+      <td class="td-badge sep-r">${r.gd}</td>
+      <td class="td-kpi100 ${kpi100Class}">${kpis100Count}</td>
+      <td class="td-kpi100 sep-r">${kpisValidCount}</td>`;
 
     // OBTIDA
     kpiCols.forEach((c, i) => {
